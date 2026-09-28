@@ -14,7 +14,7 @@
 //   MAIL_FROM_NAME        optional, default "Media Server"
 //   PAGE_URL              where the account page lives, e.g. https://you.github.io/jellyfin-join/
 //   ALLOWED_ORIGIN        optional, e.g. https://you.github.io (default "*")
-// SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically.
+// SUPABASE_URL and SUPABASE_SECRET_KEYS (or SUPABASE_SERVICE_ROLE_KEY) are provided automatically.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -31,7 +31,18 @@ const ALLOWED_ORIGIN = env("ALLOWED_ORIGIN", "*");
 const RESET_TTL_MINUTES = 30;
 const MAX_RESETS_PER_HOUR = 3;
 
-const db = createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"), {
+// New Supabase projects expose secret keys as a JSON dictionary (SUPABASE_SECRET_KEYS);
+// older ones use SUPABASE_SERVICE_ROLE_KEY. Use whichever is available.
+function serverKey() {
+  try {
+    const keys = JSON.parse(env("SUPABASE_SECRET_KEYS", "{}")) as Record<string, string>;
+    const k = keys["default"] ?? Object.values(keys)[0];
+    if (k) return k;
+  } catch { /* fall through */ }
+  return env("SUPABASE_SERVICE_ROLE_KEY");
+}
+
+const db = createClient(env("SUPABASE_URL"), serverKey(), {
   auth: { persistSession: false },
 });
 
@@ -74,6 +85,39 @@ function randomToken() {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// ─── rate limiting ──────────────────────────────────────────────────
+// Only a salted hash of the visitor's IP is stored, and rows older than a day are removed.
+function clientIp(req: Request) {
+  const h = req.headers;
+  const xff = (h.get("x-forwarded-for") ?? "").split(",")[0].trim();
+  return h.get("cf-connecting-ip") || h.get("x-real-ip") || xff || "unknown";
+}
+
+const LIMITS = {
+  "bad-invite": { perIp: 5, global: 50, minutes: 15 },     // wrong invite codes
+  "reset-request": { perIp: 5, global: 60, minutes: 60 },  // "forgot password" requests
+} as const;
+type LimitedAction = keyof typeof LIMITS;
+
+async function isLimited(action: LimitedAction, ipHash: string) {
+  const { perIp, global, minutes } = LIMITS[action];
+  const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+  const [mine, all] = await Promise.all([
+    db.from("jellyfin_attempts").select("id", { count: "exact", head: true })
+      .eq("action", action).eq("ip_hash", ipHash).gte("created_at", since),
+    db.from("jellyfin_attempts").select("id", { count: "exact", head: true })
+      .eq("action", action).gte("created_at", since),
+  ]);
+  return (mine.count ?? 0) >= perIp || (all.count ?? 0) >= global;
+}
+
+async function recordAttempt(action: LimitedAction, ipHash: string) {
+  await db.from("jellyfin_attempts").insert({ action, ip_hash: ipHash });
+  await db.from("jellyfin_attempts").delete().lt("created_at", new Date(Date.now() - 86400000).toISOString());
+}
+
+const tooMany = () => reply(429, { error: "Too many attempts. Please wait 15 minutes and try again." });
+
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 
@@ -92,7 +136,7 @@ async function sendEmail(to: string, subject: string, html: string) {
 }
 
 // ─── signup ─────────────────────────────────────────────────────────
-async function signup(body: Record<string, string>) {
+async function signup(body: Record<string, string>, ipHash: string) {
   const username = (body.username ?? "").trim();
   const email = (body.email ?? "").trim().toLowerCase();
   const password = body.password ?? "";
@@ -105,12 +149,18 @@ async function signup(body: Record<string, string>) {
   if (!passwordOk(password)) return reply(400, { error: "Password must be at least 8 characters." });
   if (!invite) return reply(400, { error: "An invite code is required." });
 
+  // Stop anyone guessing invite codes by trying lots of them
+  if (await isLimited("bad-invite", ipHash)) return tooMany();
+
   const { data: claimed, error: claimErr } = await db.rpc("claim_jellyfin_invite", { p_code: invite });
   if (claimErr) {
     await logError("signup", username, `claim: ${claimErr.message}`);
     return reply(500, { error: "Something went wrong. Please try again." });
   }
-  if (!claimed) return reply(403, { error: "That invite code is invalid, used up or expired." });
+  if (!claimed) {
+    await recordAttempt("bad-invite", ipHash);
+    return reply(403, { error: "That invite code is invalid, used up or expired." });
+  }
 
   const fail = async (status: number, message: string, detail?: string) => {
     await db.rpc("release_jellyfin_invite", { p_code: invite });
@@ -170,23 +220,49 @@ async function signup(body: Record<string, string>) {
   });
   if (insErr) return await rollback("Couldn't finish setting up the account.", `accounts insert: ${insErr.message}`);
 
+  // Welcome email (best effort: the account is already created, so a mail failure is only logged)
+  if (BREVO_API_KEY && MAIL_FROM) {
+    try {
+      const resetLink = PAGE_URL ? `${PAGE_URL}#forgot` : "";
+      await sendEmail(
+        email,
+        "Your media server account is ready",
+        `<p>Hi ${escapeHtml(username)},</p>
+         <p>Your account has been created. You can sign in now:</p>
+         <p><a href="${JELLYFIN_URL}" style="display:inline-block;padding:10px 18px;background:#00a4dc;color:#fff;border-radius:6px;text-decoration:none">Open the media server</a></p>
+         <p><b>Username:</b> ${escapeHtml(username)}<br>
+            <b>Server address</b> (for the Jellyfin app on TV, phone or tablet): ${escapeHtml(JELLYFIN_URL)}</p>
+         ${resetLink ? `<p>Forgot your password later? Reset it here: <a href="${resetLink}">${escapeHtml(resetLink)}</a></p>` : ""}
+         <p>Enjoy!</p>`,
+      );
+    } catch (e) {
+      await logError("signup-email", username, String(e));
+    }
+  }
+
   return reply(200, { ok: true, username, server: JELLYFIN_URL });
 }
 
 // ─── request-reset ──────────────────────────────────────────────────
-async function requestReset(body: Record<string, string>) {
+async function requestReset(body: Record<string, string>, ipHash: string) {
   const login = (body.login ?? "").trim();
   // Always the same answer, so the page can't be used to discover accounts.
   const generic = reply(200, {
     ok: true,
     message: "If that account exists, a reset link has been sent to its email address.",
   });
-  if (!login) return reply(400, { error: "Enter your username or email." });
+  if (!login || login.length > 254) return reply(400, { error: "Enter your username or email." });
 
+  if (await isLimited("reset-request", ipHash)) return tooMany();
+  await recordAttempt("reset-request", ipHash);
+
+  // Case-insensitive exact match. % and _ are escaped so they can't act as wildcards
+  // (otherwise typing "%" would match every account).
+  const exact = login.replace(/[\\%_]/g, (c) => "\\" + c);
   const q = db.from("jellyfin_accounts").select("id, username, email");
   const { data: accounts } = login.includes("@")
-    ? await q.ilike("email", login)
-    : await q.ilike("username", login);
+    ? await q.ilike("email", exact)
+    : await q.ilike("username", exact);
   if (!accounts?.length) return generic;
 
   for (const acct of accounts) {
@@ -284,15 +360,21 @@ Deno.serve(async (req) => {
     return reply(400, { error: "Invalid request." });
   }
 
+  if (!body || typeof body !== "object") return reply(400, { error: "Invalid request." });
+  for (const k of ["username", "email", "password", "invite", "login", "token"] as const) {
+    if (body[k] !== undefined && typeof body[k] !== "string") return reply(400, { error: "Invalid request." });
+  }
+  const ipHash = await sha256(`${clientIp(req)}:jellyfin-signup`);
+
   try {
     switch (body.action) {
       case "signup":
-        return await signup(body);
+        return await signup(body, ipHash);
       case "request-reset":
         if (!BREVO_API_KEY || !MAIL_FROM || !PAGE_URL) {
           return reply(500, { error: "Password reset isn't set up yet." });
         }
-        return await requestReset(body);
+        return await requestReset(body, ipHash);
       case "reset":
         return await reset(body);
       default:
