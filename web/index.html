@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Media Server Account</title>
+<style>
+  :root {
+    --bg: #101418; --card: #1a2027; --text: #e8edf2; --muted: #93a1b0;
+    --line: #2c3540; --accent: #00a4dc; --accent-2: #aa5cc3;
+    --err-bg: #3a1c20; --err: #ff9aa5; --ok-bg: #16322a; --ok: #7fe0b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
+    background: radial-gradient(1200px 600px at 20% -10%, #1d2a3a 0%, var(--bg) 60%);
+    color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .card {
+    width: 100%; max-width: 400px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 28px 24px; box-shadow: 0 20px 50px rgba(0,0,0,.35);
+  }
+  .logo {
+    width: 44px; height: 44px; border-radius: 12px; margin-bottom: 14px;
+    background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: .95rem; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0f1419; color: var(--text); font-size: 1rem;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+  button {
+    width: 100%; margin-top: 20px; padding: 12px; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: #fff; font-weight: 600; font-size: 1rem;
+  }
+  button:disabled { opacity: .6; cursor: wait; }
+  .msg { margin-top: 16px; padding: 10px 12px; border-radius: 8px; font-size: .92rem; display: none; }
+  .msg.err { display: block; background: var(--err-bg); color: var(--err); }
+  .msg.ok  { display: block; background: var(--ok-bg); color: var(--ok); }
+  .msg a { color: inherit; }
+  .links { margin-top: 18px; text-align: center; font-size: .9rem; }
+  .links a { color: var(--accent); text-decoration: none; }
+  .hint { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="logo" aria-hidden="true"></div>
+
+  <!-- Sign up -->
+  <section id="view-signup">
+    <h1>Create your account</h1>
+    <p class="sub">You'll need the invite code you were sent.</p>
+    <form id="form-signup" autocomplete="on">
+      <label for="su-invite">Invite code</label>
+      <input id="su-invite" name="invite" required autocomplete="off">
+      <label for="su-username">Username</label>
+      <input id="su-username" name="username" required minlength="3" maxlength="32"
+             pattern="[A-Za-z0-9._\-]{3,32}" autocomplete="username">
+      <div class="hint">Letters, numbers, dot, dash or underscore.</div>
+      <label for="su-email">Email</label>
+      <input id="su-email" name="email" type="email" required autocomplete="email">
+      <div class="hint">Only used if you need to reset your password.</div>
+      <label for="su-password">Password</label>
+      <input id="su-password" name="password" type="password" required minlength="8" autocomplete="new-password">
+      <label for="su-confirm">Confirm password</label>
+      <input id="su-confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password">
+      <button type="submit">Create account</button>
+    </form>
+    <div class="msg" role="status" aria-live="polite"></div>
+    <div class="links"><a href="#forgot">Forgot your password?</a></div>
+  </section>
+
+  <!-- Forgot -->
+  <section id="view-forgot" hidden>
+    <h1>Forgot password</h1>
+    <p class="sub">Enter your username or email and we'll send you a reset link.</p>
+    <form id="form-forgot">
+      <label for="fp-login">Username or email</label>
+      <input id="fp-login" name="login" required autocomplete="username">
+      <button type="submit">Send reset link</button>
+    </form>
+    <div class="msg" role="status" aria-live="polite"></div>
+    <div class="links"><a href="#signup">Back to sign up</a></div>
+  </section>
+
+  <!-- Reset -->
+  <section id="view-reset" hidden>
+    <h1>Choose a new password</h1>
+    <p class="sub">This link works once.</p>
+    <form id="form-reset">
+      <label for="rp-password">New password</label>
+      <input id="rp-password" name="password" type="password" required minlength="8" autocomplete="new-password">
+      <label for="rp-confirm">Confirm new password</label>
+      <input id="rp-confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password">
+      <button type="submit">Set new password</button>
+    </form>
+    <div class="msg" role="status" aria-live="polite"></div>
+  </section>
+</main>
+
+<script>
+  // ▼▼ Set this to your deployed function URL ▼▼
+  const FUNCTION_URL = "https://YOUR-PROJECT-REF.supabase.co/functions/v1/jellyfin-account";
+
+  const resetToken = new URLSearchParams(location.search).get("reset");
+
+  function show() {
+    const view = resetToken ? "reset" : (location.hash === "#forgot" ? "forgot" : "signup");
+    for (const v of ["signup", "forgot", "reset"]) {
+      document.getElementById("view-" + v).hidden = v !== view;
+    }
+  }
+  window.addEventListener("hashchange", show);
+  show();
+
+  function setMsg(section, kind, html) {
+    const el = section.querySelector(".msg");
+    el.className = "msg " + kind;
+    el.innerHTML = html;
+  }
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  async function call(payload) {
+    const res = await fetch(FUNCTION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || "Something went wrong. Please try again.");
+    return data;
+  }
+
+  function wire(formId, build, onOk) {
+    const form = document.getElementById(formId);
+    const section = form.closest("section");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      if ("confirm" in f && f.password !== f.confirm) {
+        return setMsg(section, "err", "The passwords don't match.");
+      }
+      const btn = form.querySelector("button");
+      btn.disabled = true;
+      setMsg(section, "", "");
+      try {
+        const data = await call(build(f));
+        onOk(section, data, form);
+      } catch (err) {
+        setMsg(section, "err", esc(err.message));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  const loginLine = (d) => d.server
+    ? ` You can now sign in at <a href="${esc(d.server)}">${esc(d.server)}</a> or in any Jellyfin app.`
+    : " You can now sign in to the media server.";
+
+  wire("form-signup",
+    (f) => ({ action: "signup", invite: f.invite, username: f.username, email: f.email, password: f.password }),
+    (section, d, form) => {
+      form.hidden = true;
+      setMsg(section, "ok", `Account <b>${esc(d.username)}</b> created.` + loginLine(d));
+    });
+
+  wire("form-forgot",
+    (f) => ({ action: "request-reset", login: f.login }),
+    (section, d) => setMsg(section, "ok", esc(d.message)));
+
+  wire("form-reset",
+    (f) => ({ action: "reset", token: resetToken, password: f.password }),
+    (section, d, form) => {
+      form.hidden = true;
+      history.replaceState(null, "", location.pathname); // drop the token from the address bar
+      setMsg(section, "ok", `Password updated for <b>${esc(d.username)}</b>.` + loginLine(d));
+    });
+</script>
+</body>
+</html>

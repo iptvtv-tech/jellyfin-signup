@@ -1,0 +1,4 @@
+# The account page calls this function without a logged-in Supabase user,
+# so JWT verification is off. Invite codes and emailed reset links are the gates.
+[functions.jellyfin-account]
+verify_jwt = false
