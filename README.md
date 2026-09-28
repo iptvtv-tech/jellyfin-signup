@@ -11,11 +11,14 @@ Account page (GitHub Pages) ──► Supabase Edge Function ──► Jellyfin 
 
 Jellyfin stores the passwords. Supabase only keeps the username, email and invite used.
 
+Emails (welcome on signup, and password reset links) are sent from `jellyfish@onairireland.ie` via Brevo.
+
 | File | What it is |
 |---|---|
 | `supabase/migrations/…_jellyfin_invites.sql` | Tables and functions. Run once. |
 | `supabase/functions/jellyfin-account/index.ts` | The Edge Function |
-| `web/index.html` | The sign-up / forgot / reset page |
+| `index.html` | The sign-up / forgot / reset page (served by GitHub Pages) |
+| `supabase/migrations/…_security_hardening.sql` | Rate-limit table + retired invite codes. Run once. |
 
 ---
 
@@ -26,9 +29,9 @@ Jellyfin stores the passwords. Supabase only keeps the username, email and invit
 3. *(Optional)* To limit which libraries new users can see, you need each library's ID. Open the library in the Jellyfin web app and copy the value after `topParentId=` or `parentId=` in the address bar. If you skip this, new users get every library.
 4. Uninstall the **LDAP-Auth** plugin. It isn't needed.
 
-## 2. Brevo: sender and API key (for reset emails)
+## 2. Brevo: sender and API key (for welcome and reset emails)
 
-1. In **Senders, Domains & Dedicated IPs → Senders**, make sure the address you'll send from is verified.
+1. In **Senders, Domains & Dedicated IPs → Senders**, add `jellyfish@onairireland.ie` as a sender and verify it.
 2. In **SMTP & API → API Keys**, create a key.
 
 ## 3. Supabase: database
@@ -51,8 +54,8 @@ Go to **SQL Editor → New query**, paste the whole `.sql` file, and click **Run
 | `JELLYFIN_API_KEY` | *(from step 1)* |
 | `JELLYFIN_LIBRARY_IDS` | *(optional)* `f137a2dd21bbc1b99aa5c0f6bf02a805,a656b907eb3a73532e40e44b968d0225` |
 | `BREVO_API_KEY` | *(from step 2)* |
-| `MAIL_FROM` | your verified Brevo sender address |
-| `MAIL_FROM_NAME` | `TC Media` *(or anything you like)* |
+| `MAIL_FROM` | `jellyfish@onairireland.ie` |
+| `MAIL_FROM_NAME` | `Jellyfish` *(or anything you like)* |
 | `PAGE_URL` | where the page will live, e.g. `https://yourname.github.io/jellyfin-join/` |
 | `ALLOWED_ORIGIN` | the page's site only, e.g. `https://yourname.github.io` |
 
@@ -69,7 +72,7 @@ The function URL is `https://YOUR-PROJECT-REF.supabase.co/functions/v1/jellyfin-
 
 ## 5. The page
 
-1. In `web/index.html`, set `FUNCTION_URL` near the bottom to the URL above.
+1. In `index.html`, set `FUNCTION_URL` near the bottom to the URL above.
 2. Put it on GitHub Pages, e.g. a new repo `jellyfin-join` with `index.html` at its root, then go to **Settings → Pages → Deploy from branch**.
 3. Make sure `PAGE_URL` (step 4) matches the final address exactly, including the trailing `/`.
 
@@ -101,6 +104,7 @@ update jellyfin_invites set max_uses = used_count where code = 'FAMILY-2026';   
 ## How it behaves
 
 **Signup**
+- A welcome email goes to the new user with their username, the server address and the reset link. If it fails, the account is still created and the error is logged.
 - The invite code is claimed first, and no more than `max_uses` times.
 - If anything fails afterwards, the use is given back and any half-made Jellyfin user is deleted.
 - New users are not admins, can't delete media, and are hidden from the login-screen user list.
@@ -109,6 +113,13 @@ update jellyfin_invites set max_uses = used_count where code = 'FAMILY-2026';   
 - The link is emailed to the address given at signup, works once, and expires after 30 minutes.
 - Each account can request at most 3 links per hour.
 - The page always shows the same message, so nobody can use it to find out which usernames or emails exist.
+
+**Abuse protection**
+- 5 wrong invite codes from one connection blocks further tries for 15 minutes (50 wrong codes site-wide in 15 minutes pauses everyone).
+- 5 "forgot password" requests per connection per hour.
+- Only a hash of the visitor's IP is stored, and those records are removed after a day.
+- Use long random invite codes (e.g. `JF-8QX4-M2PV-7KDA`), few uses and a short expiry. Never reuse the example codes in this README.
+- The page has a strict Content Security Policy. If you edit the `<script>` in `index.html`, the `sha256-…` value in its CSP meta tag must be updated, or the page stops working.
 
 **Other limits**
 - Accounts you created by hand in Jellyfin can't use reset, because the system has no email for them. Add a row to `jellyfin_accounts` with their username, email and Jellyfin user ID (shown in the address bar on their user page in the Dashboard) to enable it.
